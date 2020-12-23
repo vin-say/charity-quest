@@ -30,11 +30,45 @@ def results_to_df(results):
 
     return listed_results
 
+##############################################
+#----Assume role to gain temp credentials----#
+##############################################
+
+# create an STS client object that represents a live connection to the 
+# STS service
+sts_client = boto3.client('sts')
+
+# Call the assume_role method of the STSConnection object and pass the role
+# ARN and a role session name.
+assumed_role_object=sts_client.assume_role(
+    RoleArn="arn:aws:iam::373598043715:role/Boto3-Access-Assumed",
+    RoleSessionName="AssumeRoleSession1"
+)
+
+# From the response that contains the assumed role, get the temporary 
+# credentials that can be used to make subsequent API calls
+credentials=assumed_role_object['Credentials']
+
+# Use the temporary credentials that AssumeRole returns to make a 
+# connection to Amazon S3  
+s3_resource=boto3.resource(
+    's3',
+    aws_access_key_id=credentials['AccessKeyId'],
+    aws_secret_access_key=credentials['SecretAccessKey'],
+    aws_session_token=credentials['SessionToken'],
+)
+
+
 #####################
 #----Import Data----#
 #####################
 
-client = boto3.client('athena')
+client = boto3.client(
+    'athena',
+    aws_access_key_id=credentials['AccessKeyId'],
+    aws_secret_access_key=credentials['SecretAccessKey'],
+    aws_session_token=credentials['SessionToken']
+)
 
 QueryString = '''
     WITH usrs AS (
@@ -76,9 +110,14 @@ df = pd.DataFrame(results_to_df(response))
 
 # save in CSV format to S3, first deleting the previous file
 
-client = boto3.client('s3')
+client = boto3.client(
+    's3',
+    aws_access_key_id=credentials['AccessKeyId'],
+    aws_secret_access_key=credentials['SecretAccessKey'],
+    aws_session_token=credentials['SessionToken'],
+)
 
-bucket = 'playfab-events-processing' # already created on S3
+bucket = 'playfab-events-processing'
 key = 'clean_data_admin_dash/data.csv'
 
 client.delete_object(Bucket=bucket, Key=key)
