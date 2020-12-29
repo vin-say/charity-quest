@@ -126,3 +126,12 @@ csv_buffer = StringIO()
 df.to_csv(csv_buffer, index=False)
 s3_resource = boto3.resource('s3')
 s3_resource.Object(bucket, key).put(Body=csv_buffer.getvalue())
+
+# update the elastic beanstalk server so Dash app reflects latest data
+
+eb_client = boto3.client('elasticbeanstalk')
+
+eb_client.restart_app_server(
+    EnvironmentId = 'e-cxdsnkbhk3',
+    EnvironmentName = 'CqAdDash-env'
+)
