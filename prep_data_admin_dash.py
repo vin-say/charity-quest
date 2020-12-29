@@ -129,7 +129,12 @@ s3_resource.Object(bucket, key).put(Body=csv_buffer.getvalue())
 
 # update the elastic beanstalk server so Dash app reflects latest data
 
-eb_client = boto3.client('elasticbeanstalk')
+eb_client = boto3.client(
+    'elasticbeanstalk',
+    aws_access_key_id=credentials['AccessKeyId'],
+    aws_secret_access_key=credentials['SecretAccessKey'],
+    aws_session_token=credentials['SessionToken']
+)
 
 eb_client.restart_app_server(
     EnvironmentId = 'e-cxdsnkbhk3',
