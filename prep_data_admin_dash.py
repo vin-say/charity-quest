@@ -30,6 +30,53 @@ def results_to_df(results):
 
     return listed_results
 
+
+def run_athena_query(boto_client, query_string, database, output_location):
+    '''Run Athena query and output the result
+
+    param boto_client (Boto3 client): Boto3 Athena client
+    param query_string (str): SQL query
+    param database (str): Athena database name from where tables originate
+    param output_location (str): S3 location where queries are stored
+
+    return query_output: Athena output
+    '''
+
+    queryStart = boto_client.start_query_execution(
+        QueryString = query_string,
+        QueryExecutionContext = {
+            'Database': database
+        },
+        ResultConfiguration = {
+            'OutputLocation': output_location
+        }
+    )
+
+    # regularly check to see if query has completed before trying to get output
+    status = 'QUEUED' 
+    while status in ['RUNNING', 'QUEUED']:
+        time.sleep(5)
+        status = boto_client.get_query_execution(QueryExecutionId = queryStart['QueryExecutionId'])['QueryExecution']['Status']['State']
+
+    query_output = boto_client.get_query_results(QueryExecutionId = queryStart['QueryExecutionId'])
+    return query_output
+
+def df2csv_S3(boto_client, df, bucket, key):
+    '''Run Athena query and output the result, first emptying the file location
+
+    param boto_client (Boto3 client): Boto3 Athena client
+    param df (Pandas dataframe): Dataframe to save
+    param bucket (str): Name of S3 bucket file will be saved in
+    param key (str): File path
+    '''
+
+    boto_client.delete_object(Bucket=bucket, Key=key)
+
+    csv_buffer = StringIO()
+    df.to_csv(csv_buffer, index=False)
+    s3_resource = boto3.resource('s3')
+    s3_resource.Object(bucket, key).put(Body=csv_buffer.getvalue())
+
 ##############################################
 #----Assume role to gain temp credentials----#
 ##############################################
@@ -58,27 +105,39 @@ s3_resource=boto3.resource(
     aws_session_token=credentials['SessionToken'],
 )
 
-
 #####################
 #----Import Data----#
 #####################
 
-client = boto3.client(
+athena_client = boto3.client(
     'athena',
     aws_access_key_id=credentials['AccessKeyId'],
     aws_secret_access_key=credentials['SecretAccessKey'],
     aws_session_token=credentials['SessionToken']
 )
 
-QueryString = '''
+database = 'playfab_events'
+output_location = 's3://playfab-events-processing/athena-query-results/boto-temp-outputs'
+
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=credentials['AccessKeyId'],
+    aws_secret_access_key=credentials['SecretAccessKey'],
+    aws_session_token=credentials['SessionToken'],
+)
+
+bucket = 'playfab-events-processing'
+
+# query definitions
+query_quest_signup = '''
     WITH usrs AS (
-    SELECT DISTINCT entityid, username 
-    FROM playfab_events.trans_player_linked_account
+        SELECT DISTINCT entityid, username 
+        FROM playfab_events.trans_player_linked_account
     ),
 
     times AS (
-    SELECT DISTINCT entityid, timestamp
-    FROM playfab_events.trans_player_inventory_item_added
+        SELECT DISTINCT entityid, timestamp
+        FROM playfab_events.trans_player_inventory_item_added
     )
 
     SELECT usrs.username, usrs.entityid, times.timestamp
@@ -87,48 +146,37 @@ QueryString = '''
     ORDER BY timestamp
 '''
 
-queryStart = client.start_query_execution(
-    QueryString = QueryString,
-    QueryExecutionContext = {
-        'Database': 'playfab_events'
-    },
-    ResultConfiguration = {
-        'OutputLocation': 's3://playfab-events-processing/athena-query-results/boto-temp-outputs'
-    }
-)
+query_player_creation = '''
+    SELECT DISTINCT entityid, timestamp
+    FROM playfab_events.trans_entity_created
+    ORDER BY timestamp
+'''
 
-# regularly check to see if query has completed before trying to get output
-status = 'QUEUED' 
-while status in ['RUNNING', 'QUEUED']:
-    time.sleep(5)
-    status = client.get_query_execution(QueryExecutionId = queryStart['QueryExecutionId'])['QueryExecution']['Status']['State']
+query_player_login = '''
+    SELECT 
+        eventid, entityid, platformusername, 
+        location.countrycode, location.city, location.latitude, location.longitude, 
+        timestamp 
+    FROM playfab_events.trans_player_logged_in 
+'''
 
-response = client.get_query_results(QueryExecutionId = queryStart['QueryExecutionId'])
-
-# convert output to data frame
+# run and save queries
+response = run_athena_query(athena_client, query_quest_signup, database, output_location)
 df = pd.DataFrame(results_to_df(response))
+key = 'clean_data_admin_dash/quest_signups.csv'
+df2csv_S3(s3_client, df, bucket, key)
 
-# save in CSV format to S3, first deleting the previous file
+response = run_athena_query(athena_client, query_player_creation, database, output_location)
+df = pd.DataFrame(results_to_df(response))
+key = 'clean_data_admin_dash/player_creation.csv'
+df2csv_S3(s3_client, df, bucket, key)
 
-client = boto3.client(
-    's3',
-    aws_access_key_id=credentials['AccessKeyId'],
-    aws_secret_access_key=credentials['SecretAccessKey'],
-    aws_session_token=credentials['SessionToken'],
-)
-
-bucket = 'playfab-events-processing'
-key = 'clean_data_admin_dash/data.csv'
-
-client.delete_object(Bucket=bucket, Key=key)
-
-csv_buffer = StringIO()
-df.to_csv(csv_buffer, index=False)
-s3_resource = boto3.resource('s3')
-s3_resource.Object(bucket, key).put(Body=csv_buffer.getvalue())
+response = run_athena_query(athena_client, query_player_login, database, output_location)
+df = pd.DataFrame(results_to_df(response))
+key = 'clean_data_admin_dash/player_logins.csv'
+df2csv_S3(s3_client, df, bucket, key)
 
 # update the elastic beanstalk server so Dash app reflects latest data
-
 eb_client = boto3.client(
     'elasticbeanstalk',
     aws_access_key_id=credentials['AccessKeyId'],
