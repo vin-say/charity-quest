@@ -6,30 +6,6 @@ import time
 ##############################
 #----Function definitions----#
 ##############################
-# ref: https://stackoverflow.com/questions/52026405/how-to-create-dataframe-from-aws-athena-using-boto3-get-query-results-method
-
-def results_to_df(results):
-
-    columns = [
-        col['Label']
-        for col in results['ResultSet']['ResultSetMetadata']['ColumnInfo']
-    ]
-
-    listed_results = []
-    for res in results['ResultSet']['Rows'][1:]:
-        values = []
-        for field in res['Data']:
-            try:
-                values.append(list(field.values())[0]) 
-            except:
-                values.append(list(' '))
-
-        listed_results.append(
-            dict(zip(columns, values))
-        )
-
-    return listed_results
-
 
 def run_athena_query(boto_client, query_string, database, output_location):
     '''Run Athena query and output the result
@@ -58,8 +34,17 @@ def run_athena_query(boto_client, query_string, database, output_location):
         time.sleep(5)
         status = boto_client.get_query_execution(QueryExecutionId = queryStart['QueryExecutionId'])['QueryExecution']['Status']['State']
 
-    query_output = boto_client.get_query_results(QueryExecutionId = queryStart['QueryExecutionId'])
-    return query_output
+    results_paginator = boto_client.get_paginator('get_query_results')
+    results_iter = results_paginator.paginate(QueryExecutionId = queryStart['QueryExecutionId'])
+
+    results = []
+    data_list = []
+    for results_page in results_iter:
+        for row in results_page['ResultSet']['Rows']:
+            data_list.append(row['Data'])
+    for datum in data_list[0:]:
+        results.append([x['VarCharValue'] if 'VarCharValue' in x else '' for x in datum])
+    return [tuple(x) for x in results]
 
 def df2csv_S3(boto_client, df, bucket, key):
     '''Run Athena query and output the result, first emptying the file location
@@ -146,35 +131,46 @@ query_quest_signup = '''
     ORDER BY timestamp
 '''
 
-query_player_creation = '''
-    SELECT DISTINCT entityid, timestamp
-    FROM playfab_events.trans_entity_created
+query_map = '''
+    WITH locs AS 
+        (SELECT DISTINCT eventid,
+            entityid,
+            platformusername,
+            location.countrycode countrycode,
+            location.city city,
+            location.latitude latitude,
+            location.longitude longitude,
+            timestamp
+        FROM playfab_events.trans_player_logged_in ), usrs AS 
+        (SELECT DISTINCT entityid
+        FROM playfab_events.trans_player_inventory_item_added
+        WHERE itemid = 'quest_contract'
+        GROUP BY  entityid)
+        
+    SELECT locs.platformusername,
+            usrs.entityid,
+            locs.countrycode,
+            locs.city,
+            locs.latitude,
+            locs.longitude,
+            locs.timestamp
+    FROM locs
+    JOIN usrs
+        ON locs.entityid = usrs.entityid
     ORDER BY timestamp
-'''
-
-query_player_login = '''
-    SELECT 
-        eventid, entityid, platformusername, 
-        location.countrycode, location.city, location.latitude, location.longitude, 
-        timestamp 
-    FROM playfab_events.trans_player_logged_in 
 '''
 
 # run and save queries
 response = run_athena_query(athena_client, query_quest_signup, database, output_location)
-df = pd.DataFrame(results_to_df(response))
+df = pd.DataFrame(response[1:], columns=response[0])
 key = 'clean_data_admin_dash/quest_signups.csv'
 df2csv_S3(s3_client, df, bucket, key)
 
-response = run_athena_query(athena_client, query_player_creation, database, output_location)
-df = pd.DataFrame(results_to_df(response))
-key = 'clean_data_admin_dash/player_creation.csv'
+response = run_athena_query(athena_client, query_map, database, output_location)
+df = pd.DataFrame(response[1:], columns=response[0])
+key = 'clean_data_admin_dash/map_data.csv'
 df2csv_S3(s3_client, df, bucket, key)
 
-response = run_athena_query(athena_client, query_player_login, database, output_location)
-df = pd.DataFrame(results_to_df(response))
-key = 'clean_data_admin_dash/player_logins.csv'
-df2csv_S3(s3_client, df, bucket, key)
 
 # update the elastic beanstalk server so Dash app reflects latest data
 eb_client = boto3.client(
